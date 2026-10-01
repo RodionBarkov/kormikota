@@ -15,6 +15,8 @@ const STATUS = { have: 'Есть', low: 'Мало', out: 'Нет' };
 const STATUS_LONG = { have: 'есть', low: 'заканчивается', out: 'нет' };
 const BOUGHT_VISIBLE = 12 * 3600; // сколько часов купленное висит зачёркнутым в списке
 const FEED_WHAT = ['Сухой корм', 'Влажный корм', 'Лакомство'];
+const FEED_DAYS = 35; // столько дней истории кормлений видно сразу (столько же отдаёт сервер в /api/state)
+const FEED_MORE_DAYS = 30; // «Показать ещё» добавляет столько дней
 const TABS = [
   { id: 'buy', ic: '🛒', name: 'Купить' },
   { id: 'home', ic: '🏠', name: 'Дома' },
@@ -24,7 +26,7 @@ const TABS = [
 ];
 
 const S = {
-  me: null, users: [], cats: [], items: [], feedings: [], rev: 0, tigraPhoto: null,
+  me: null, users: [], cats: [], items: [], feedings: [], feedOldest: null, feedFrom: null, rev: 0, tigraPhoto: null,
   tab: store.get('tab', 'buy'), cat: 'all', q: '', addQ: '', feedWhat: '',
   log: [], logUser: '', logMore: true, logLoading: false,
   sheetOpen: false, pendingRender: false, installEvt: null,
@@ -35,7 +37,10 @@ const MONTHS_FULL = ['января', 'февраля', 'марта', 'апрел
 const WEEKDAYS = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
 
 const hhmm = (d) => String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+const daysAgoStart = (n) => { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - n); return d.getTime() / 1000; };
+const tz = () => new Date().getTimezoneOffset();
 
 function when(ts) {
   const d = new Date(ts * 1000);
@@ -220,7 +225,8 @@ async function api(path, body) {
 async function refresh() {
   const d = await api('/api/state');
   S.me = d.me; S.users = d.users; S.cats = d.categories; S.items = d.items;
-  S.feedings = d.feedings; S.rev = d.rev; S.tigraPhoto = d.tigra_photo;
+  S.feedings = d.feedings; S.feedOldest = d.feed_oldest; S.rev = d.rev; S.tigraPhoto = d.tigra_photo;
+  if (S.feedFrom) S.feedings = (await api('/api/feedings?since=' + S.feedFrom)).feedings;
   if (S.tab === 'log') loadLog(true);
   render();
 }
@@ -432,21 +438,81 @@ function viewTigra() {
     <div class="chips wrap">${FEED_WHAT.map((w) =>
       `<button class="chip ${S.feedWhat === w ? 'on' : ''}" data-a="feed-what" data-w="${esc(w)}">${esc(w)}</button>`).join('')}
     </div>
-    <button class="feed-btn" data-a="feed">🍽 Тигра покормлена<small>нажмите сразу после кормления</small></button>`;
-  for (const g of groupByDay(S.feedings)) {
-    html += `<div class="group-title">${esc(g.label)} <span class="n">${g.items.length}</span></div>
-      <div class="list">${g.items.map((f) => {
-        const u = userById(f.user_id);
-        const mine = f.user_id === S.me.id || S.me.role === 'admin';
-        return `<div class="row feed-row">
-          <span class="time">${hhmm(new Date(f.at * 1000))}</span>
-          ${avatarHtml(u)}
-          <span class="txt"><b>${esc(u ? u.name : '—')}</b>${f.what ? `<small>${esc(f.what)}</small>` : ''}</span>
-          ${mine ? `<button class="del" data-a="feed-del" data-id="${f.id}" aria-label="Удалить">✕</button>` : ''}
-        </div>`;
-      }).join('')}</div>`;
+    <button class="feed-btn" data-a="feed">🍽 Тигра покормлена<small>нажмите сразу после кормления</small></button>
+    <button class="link-btn" data-a="feed-manual">🕐 Забыли отметить? Указать время</button>`;
+  const from = feedFrom();
+  const days = feedDays(from);
+  if (days.length) html += '<h3 class="section-title">История кормлений</h3>';
+  for (const d of days) {
+    if (!d.items.length) {
+      html += `<div class="group-title">${esc(d.until ? dayRange(d.ts, d.until) : dayLabel(d.ts / 1000))} <span class="miss">не отмечали</span></div>`;
+      continue;
+    }
+    const n = d.items.length;
+    html += `<div class="group-title">${esc(dayLabel(d.ts / 1000))} <span class="n">· ${n} ${plural(n, 'раз', 'раза', 'раз')}</span>${feedSummary(d.items)}</div>
+      <div class="list">${d.items.map(feedRow).join('')}</div>`;
+  }
+  if (S.feedOldest && S.feedOldest < from) {
+    html += `<div style="margin-top:14px"><button class="btn ghost" data-a="feed-more">Показать ещё ${FEED_MORE_DAYS} дней</button></div>`;
   }
   return html;
+}
+
+const feedFrom = () => S.feedFrom || daysAgoStart(FEED_DAYS - 1);
+
+// Дни от сегодня назад до `from` (но не раньше самого первого кормления).
+// Дни без кормлений тоже попадают в список; несколько пустых дней подряд склеиваются в один ({ts, until}).
+function feedDays(from) {
+  if (!S.feedOldest) return [];
+  const byDay = new Map();
+  for (const f of S.feedings) {
+    if (f.at < from) continue;
+    const k = dayStart(new Date(f.at * 1000));
+    if (!byDay.has(k)) byDay.set(k, []);
+    byDay.get(k).push(f);
+  }
+  const first = Math.max(from * 1000, dayStart(new Date(S.feedOldest * 1000)));
+  const days = [];
+  const today = dayStart(new Date());
+  for (const d = new Date(today); d.getTime() >= first; d.setDate(d.getDate() - 1)) {
+    const ts = d.getTime(), items = byDay.get(ts) || [];
+    const prev = days[days.length - 1];
+    if (!items.length && prev && !prev.items.length && prev.ts !== today) {
+      prev.until = prev.until || prev.ts;
+      prev.ts = ts;
+    } else {
+      days.push({ ts, items });
+    }
+  }
+  return days;
+}
+
+// «24–26 сентября», «30 августа – 2 сентября»
+function dayRange(fromMs, toMs) {
+  const a = new Date(fromMs), b = new Date(toMs);
+  const y = b.getFullYear() !== new Date().getFullYear() ? ' ' + b.getFullYear() : '';
+  if (a.getMonth() === b.getMonth()) return a.getDate() + '–' + b.getDate() + ' ' + MONTHS_FULL[b.getMonth()] + y;
+  return a.getDate() + ' ' + MONTHS_FULL[a.getMonth()] + ' – ' + b.getDate() + ' ' + MONTHS_FULL[b.getMonth()] + y;
+}
+
+function feedSummary(list) {
+  const counts = new Map();
+  for (const f of list) if (f.what) counts.set(f.what, (counts.get(f.what) || 0) + 1);
+  if (!counts.size) return '';
+  return `<span class="day-sum">${[...counts].map(([w, n]) => esc(w) + (n > 1 ? ' ×' + n : '')).join(' · ')}</span>`;
+}
+
+function feedRow(f) {
+  const u = userById(f.user_id);
+  const mine = f.id > 0 && (f.user_id === S.me.id || S.me.role === 'admin');
+  const late = f.added_at && f.added_at - f.at > 600;
+  const sub = [f.what ? esc(f.what) : '', late ? '✍️ внесено позже' : ''].filter(Boolean).join(' · ');
+  return `<div class="row feed-row" ${mine ? `data-a="feed-edit" data-id="${f.id}" role="button"` : ''}>
+    <span class="time">${hhmm(new Date(f.at * 1000))}</span>
+    ${avatarHtml(u)}
+    <span class="txt"><b>${esc(u ? u.name : '—')}</b>${sub ? `<small>${sub}</small>` : ''}</span>
+    ${mine ? `<button class="del" data-a="feed-del" data-id="${f.id}" aria-label="Удалить">✕</button>` : ''}
+  </div>`;
 }
 
 /* ── вкладка «История» ── */
@@ -789,6 +855,81 @@ function viewPhoto(it) {
   v.onclick = () => history.back();
 }
 
+/* ── кормление задним числом и исправление записи ── */
+
+function feedSheet(id) {
+  const f = id ? S.feedings.find((x) => x.id === id) : null;
+  if (id && !f) return toast('Запись не найдена — возможно, её удалили', null, true);
+  const st = { what: f ? f.what : S.feedWhat };
+  const start = new Date((f ? f.at : nowSec()) * 1000);
+  const quick = [[30, '30 мин назад'], [60, '1 ч назад'], [120, '2 ч назад'], [180, '3 ч назад']];
+  const sheet = openSheet(`
+    ${sheetHead(f ? 'Кормление' : 'Когда кормили?')}
+    ${f ? '' : `<div class="field"><div class="chips wrap" id="k-quick">${quick.map(([m, t]) =>
+      `<button class="chip" data-m="${m}">${t}</button>`).join('')}</div></div>`}
+    <div class="btns">
+      <div class="field"><label>День</label><input id="k-date" type="date" max="${ymd(new Date())}" value="${ymd(start)}"></div>
+      <div class="field"><label>Время</label><input id="k-time" type="time" value="${hhmm(start)}"></div>
+    </div>
+    <div class="field"><label>Что дали</label><div class="chips wrap" id="k-what"></div></div>
+    <div class="err" id="k-err"></div>
+    <button class="btn" id="k-save">${f ? 'Сохранить' : 'Записать кормление'}</button>
+    ${f ? `<p class="muted" style="font-size:13px;margin:14px 4px 0">Внес(ла) ${esc(userName(f.user_id))}${f.added_at ? ' ' + esc(when(f.added_at)) : ''}.</p>
+      <div style="margin-top:10px"><button class="btn danger" id="k-del">🗑 Удалить запись</button></div>` : ''}`);
+
+  const drawWhat = () => {
+    $('#k-what', sheet).innerHTML = FEED_WHAT.map((w) =>
+      `<button class="chip ${st.what === w ? 'on' : ''}" data-w="${esc(w)}">${esc(w)}</button>`).join('');
+  };
+  const clearQuick = (keep) => { for (const b of sheet.querySelectorAll('[data-m]')) b.classList.toggle('on', b === keep); };
+  drawWhat();
+
+  sheet.onclick = (e) => {
+    const w = e.target.closest('[data-w]');
+    if (w) { st.what = st.what === w.dataset.w ? '' : w.dataset.w; drawWhat(); return; }
+    const q = e.target.closest('[data-m]');
+    if (q) {
+      const d = new Date(Date.now() - q.dataset.m * 60000);
+      $('#k-date', sheet).value = ymd(d);
+      $('#k-time', sheet).value = hhmm(d);
+      clearQuick(q);
+    }
+  };
+  for (const inp of sheet.querySelectorAll('#k-date, #k-time')) inp.addEventListener('input', () => clearQuick(null));
+
+  $('#k-save', sheet).onclick = async () => {
+    const dm = /^(\d{4})-(\d{2})-(\d{2})$/.exec($('#k-date', sheet).value);
+    const tm = /^(\d{1,2}):(\d{2})/.exec($('#k-time', sheet).value);
+    if (!dm || !tm) { $('#k-err', sheet).textContent = 'Укажите день и время'; return; }
+    const at = new Date(+dm[1], dm[2] - 1, +dm[3], +tm[1], +tm[2]).getTime() / 1000;
+    if (at > nowSec() + 60) { $('#k-err', sheet).textContent = 'Это время ещё не наступило'; return; }
+    const body = { what: st.what, tz: tz() };
+    if (!f || Math.floor(f.at / 60) * 60 !== at) body.at = at;
+    const btn = $('#k-save', sheet);
+    btn.disabled = true; btn.innerHTML = '<span class="spin"></span>';
+    try {
+      const r = await api(f ? `/api/feed/${f.id}` : '/api/feed', body);
+      closeSheet();
+      if (!f) S.feedWhat = '';
+      // запись старше показанного периода — расширяем историю, чтобы её было видно
+      if (at < feedFrom()) S.feedFrom = dayStart(new Date(at * 1000)) / 1000;
+      await refresh();
+      if (f) toast('Сохранено');
+      else toast('🐯 Записано: ' + when(at), () => run(() => api(`/api/feed/${r.id}/delete`, { tz: tz() })).catch(() => {}));
+    } catch (err) {
+      $('#k-err', sheet).textContent = err.message;
+      btn.disabled = false; btn.textContent = f ? 'Сохранить' : 'Записать кормление';
+    }
+  };
+
+  if (f) {
+    $('#k-del', sheet).onclick = async () => {
+      if (!confirm('Удалить эту запись о кормлении?')) return;
+      try { await api(`/api/feed/${f.id}/delete`, { tz: tz() }); closeSheet(); toast('Запись удалена'); refresh(); } catch (err) { toast(err.message, null, true); }
+    };
+  }
+}
+
 /* ── прочие шторки ── */
 
 function catSheet(id) {
@@ -946,11 +1087,12 @@ function suggestPick(id) {
 function feed() {
   const what = S.feedWhat;
   S.feedWhat = '';
-  run(() => api('/api/feed', { what }), () => {
-    S.feedings.unshift({ id: -1, user_id: S.me.id, at: nowSec(), what });
+  run(() => api('/api/feed', { what, tz: tz() }), () => {
+    S.feedings.unshift({ id: -1, user_id: S.me.id, at: nowSec(), what, added_at: nowSec() });
+    if (!S.feedOldest) S.feedOldest = nowSec();
   }).then((r) => {
     if (navigator.vibrate) navigator.vibrate(30);
-    toast('🐯 Записано: Тигра покормлена', () => run(() => api(`/api/feed/${r.id}/delete`, {})).catch(() => {}));
+    toast('🐯 Записано: Тигра покормлена', () => run(() => api(`/api/feed/${r.id}/delete`, { tz: tz() })).catch(() => {}));
   }).catch(() => {});
 }
 
@@ -1002,7 +1144,16 @@ const ACTIONS = {
   'feed-what'(el) { S.feedWhat = S.feedWhat === el.dataset.w ? '' : el.dataset.w; render(true); },
   'feed-del'(el) {
     if (!confirm('Удалить эту запись о кормлении?')) return;
-    run(() => api(`/api/feed/${el.dataset.id}/delete`, {})).catch(() => {});
+    run(() => api(`/api/feed/${el.dataset.id}/delete`, { tz: tz() })).catch(() => {});
+  },
+  'feed-edit'(el) { feedSheet(+el.dataset.id); },
+  'feed-manual'() { feedSheet(null); },
+  'feed-more'(el) {
+    const d = new Date(feedFrom() * 1000);
+    d.setDate(d.getDate() - FEED_MORE_DAYS);
+    S.feedFrom = d.getTime() / 1000;
+    el.disabled = true; el.innerHTML = '<span class="spin"></span>';
+    refresh().catch((e) => toast(e.message, null, true));
   },
   'tigra-photo'() { tigraPhoto(); },
   'log-user'(el) { S.logUser = el.dataset.u; S.log = []; loadLog(true); render(true); },

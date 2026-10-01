@@ -33,6 +33,7 @@ OLD_DB_PATH = os.path.join(DATA, "kladovka.db")   # имя базы до пер�
 ADMIN_FILE = os.path.join(DATA, "ADMIN_PASSWORD.txt")
 
 SESSION_TTL = 365 * 24 * 3600   # вход «навсегда» — раз в год
+FEED_DAYS = 35                  # за сколько дней кормления приходят вместе с общим состоянием
 MAX_BODY = 8 * 1024 * 1024
 STATUSES = {"have": "есть", "low": "заканчивается", "out": "нет"}
 STATUS_ICON = {"have": "🟢", "low": "🟡", "out": "🔴"}
@@ -79,7 +80,7 @@ CREATE TABLE IF NOT EXISTS items(
   deleted INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS feedings(
   id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, at INTEGER NOT NULL,
-  what TEXT NOT NULL DEFAULT '', deleted INTEGER NOT NULL DEFAULT 0);
+  what TEXT NOT NULL DEFAULT '', deleted INTEGER NOT NULL DEFAULT 0, added_at INTEGER);
 CREATE TABLE IF NOT EXISTS log(
   id INTEGER PRIMARY KEY, user_id INTEGER, at INTEGER NOT NULL, icon TEXT NOT NULL DEFAULT '',
   text TEXT NOT NULL, item_id INTEGER);
@@ -101,6 +102,8 @@ def init():
             os.rename(OLD_DB_PATH, DB_PATH)
         db = connect()
         db.executescript(SCHEMA)
+        if "added_at" not in [r[1] for r in db.execute("PRAGMA table_info(feedings)")]:
+            db.execute("ALTER TABLE feedings ADD COLUMN added_at INTEGER")   # когда запись сделали (может быть позже кормления)
         if not db.execute("SELECT 1 FROM categories LIMIT 1").fetchone():
             for i, (emoji, name) in enumerate(DEFAULT_CATEGORIES):
                 db.execute("INSERT INTO categories(name,emoji,sort) VALUES(?,?,?)", (name, emoji, i))
@@ -334,7 +337,10 @@ def api_state(req, db, user):
             "SELECT id,name,category_id,status,note,photo,created_by,created_at,updated_by,updated_at,"
             "bought_by,bought_at FROM items WHERE deleted=0 ORDER BY name COLLATE NOCASE")),
         "feedings": rows(db.execute(
-            "SELECT id,user_id,at,what FROM feedings WHERE deleted=0 ORDER BY at DESC LIMIT 100")),
+            "SELECT id,user_id,at,what,added_at FROM feedings WHERE deleted=0 AND (at>=? OR id="
+            "(SELECT id FROM feedings WHERE deleted=0 ORDER BY at DESC LIMIT 1)) ORDER BY at DESC",
+            (now() - FEED_DAYS * 86400,))),
+        "feed_oldest": db.execute("SELECT MIN(at) FROM feedings WHERE deleted=0").fetchone()[0],
         "tigra_photo": get_meta(db, "tigra_photo"),
     })
 
@@ -521,24 +527,80 @@ def serve_photo(req, name):
 
 # ───────────────────────────── Тигра ─────────────────────────────
 
-def api_feed(req, db, user):
-    body = req.json()
-    what = s(body, "what", 60) or ""
-    cur = db.execute("INSERT INTO feedings(user_id,at,what) VALUES(?,?,?)", (user["id"], now(), what))
-    log(db, user, "🐯", "Покормлена Тигра" + (" (%s)" % what.lower() if what else ""))
-    db.commit()
-    return ok({"id": cur.lastrowid})
+def local_time(ts, body):
+    """Время для журнала в часовом поясе телефона (tz — как getTimezoneOffset() в JS)."""
+    tz = body.get("tz")
+    if isinstance(tz, int) and -900 <= tz <= 900:
+        return time.strftime("%d.%m %H:%M", time.gmtime(ts - tz * 60))
+    return time.strftime("%d.%m %H:%M UTC", time.gmtime(ts))
 
 
-def api_feed_delete(req, db, user, feed_id):
+def feed_time(body):
+    try:
+        at = int(body["at"])
+    except (TypeError, ValueError):
+        raise HttpError(400, "Неверное время")
+    if at > now() + 120:
+        raise HttpError(400, "Это время ещё не наступило")
+    if at < now() - 366 * 86400:
+        raise HttpError(400, "Можно отметить не раньше чем год назад")
+    return at
+
+
+def get_feeding(db, user, feed_id):
     f = db.execute("SELECT * FROM feedings WHERE id=? AND deleted=0", (feed_id,)).fetchone()
     if not f:
         raise HttpError(404, "Запись не найдена")
     if f["user_id"] != user["id"] and user["role"] != "admin":
-        raise HttpError(403, "Удалить можно только свою запись")
+        raise HttpError(403, "Менять можно только свои записи")
+    return f
+
+
+def api_feedings(req, db, user):
+    since = int(req.query["since"]) if req.query.get("since", "").isdigit() else now() - FEED_DAYS * 86400
+    return ok({"feedings": rows(db.execute(
+        "SELECT id,user_id,at,what,added_at FROM feedings WHERE deleted=0 AND at>=? ORDER BY at DESC", (since,)))})
+
+
+def api_feed(req, db, user):
+    body = req.json()
+    what = s(body, "what", 60) or ""
+    t = now()
+    at = feed_time(body) if body.get("at") is not None else t
+    cur = db.execute("INSERT INTO feedings(user_id,at,what,added_at) VALUES(?,?,?,?)", (user["id"], at, what, t))
+    text = "Покормлена Тигра" + (" (%s)" % what.lower() if what else "")
+    if t - at > 300:
+        text += " — %s, отмечено позже" % local_time(at, body)
+    log(db, user, "🐯", text)
+    db.commit()
+    return ok({"id": cur.lastrowid})
+
+
+def api_feed_update(req, db, user, feed_id):
+    body = req.json()
+    f = get_feeding(db, user, feed_id)
+    changes = []
+    if body.get("at") is not None:
+        at = feed_time(body)
+        if at != f["at"]:
+            db.execute("UPDATE feedings SET at=? WHERE id=?", (at, feed_id))
+            changes.append("%s → %s" % (local_time(f["at"], body), local_time(at, body)))
+    if "what" in body:
+        what = s(body, "what", 60) or ""
+        if what != f["what"]:
+            db.execute("UPDATE feedings SET what=? WHERE id=?", (what, feed_id))
+            changes.append("%s → %s" % ((f["what"] or "без отметки").lower(), (what or "без отметки").lower()))
+    if changes:
+        log(db, user, "✏️", "Исправлено кормление Тигры от %s: %s" % (local_time(f["at"], body), ", ".join(changes)))
+        db.commit()
+    return ok()
+
+
+def api_feed_delete(req, db, user, feed_id):
+    body = req.json()
+    f = get_feeding(db, user, feed_id)
     db.execute("UPDATE feedings SET deleted=1 WHERE id=?", (feed_id,))
-    when = time.strftime("%d.%m %H:%M UTC", time.gmtime(f["at"]))
-    log(db, user, "↩️", "Отменено кормление Тигры от %s" % when)
+    log(db, user, "↩️", "Отменено кормление Тигры от %s" % local_time(f["at"], body))
     db.commit()
     return ok()
 
@@ -732,7 +794,9 @@ ROUTES = [
     ("POST", r"/api/items/(\d+)/unbuy", api_item_unbuy, USER),
     ("POST", r"/api/items/(\d+)/delete", api_item_delete, USER),
     ("POST", r"/api/items/(\d+)/photo", api_item_photo, USER),
+    ("GET", r"/api/feedings", api_feedings, USER),
     ("POST", r"/api/feed", api_feed, USER),
+    ("POST", r"/api/feed/(\d+)", api_feed_update, USER),
     ("POST", r"/api/feed/(\d+)/delete", api_feed_delete, USER),
     ("POST", r"/api/tigra/photo", api_tigra_photo, USER),
     ("POST", r"/api/categories", api_cat_create, USER),

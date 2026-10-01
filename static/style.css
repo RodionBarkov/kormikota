@@ -313,3 +313,13 @@ main { padding: 0 16px calc(var(--tabs-h) + env(safe-area-inset-bottom) + 90px);
 .spin { display: inline-block; width: 18px; height: 18px; border: 2.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading { display: flex; justify-content: center; padding: 60px; color: var(--muted); }
+
+/* ── Тигра: ручная отметка и история по дням ── */
+.link-btn { display: block; width: 100%; padding: 12px; color: var(--accent); font-weight: 700; font-size: 15px; text-align: center; }
+.section-title { margin: 22px 4px 0; font-size: 20px; }
+.group-title { flex-wrap: wrap; }
+.group-title .miss { color: var(--out); text-transform: none; letter-spacing: 0; font-weight: 600; }
+.group-title .day-sum { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 600; color: var(--text); opacity: .7; }
+.feed-row[role="button"] { cursor: pointer; }
+.feed-row .txt small { white-space: normal; }
+input[type="date"], input[type="time"] { min-width: 0; min-height: 50px; -webkit-appearance: none; appearance: none; }
