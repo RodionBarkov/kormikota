@@ -21,6 +21,7 @@ const TABS = [
   { id: 'buy', ic: '🛒', name: 'Купить' },
   { id: 'home', ic: '🏠', name: 'Дома' },
   { id: 'tigra', ic: '🐯', name: 'Тигра' },
+  { id: 'chat', ic: '💬', name: 'Чат' },
   { id: 'log', ic: '🕓', name: 'История' },
   { id: 'more', ic: '⚙️', name: 'Ещё' },
 ];
@@ -29,6 +30,7 @@ const S = {
   me: null, users: [], cats: [], items: [], feedings: [], feedOldest: null, feedFrom: null, rev: 0, tigraPhoto: null,
   tab: store.get('tab', 'buy'), cat: 'all', q: '', addQ: '', feedWhat: '',
   log: [], logUser: '', logMore: true, logLoading: false,
+  chat: [], chatRev: null, chatMore: false, chatDraft: '', chatLoading: false,
   sheetOpen: false, pendingRender: false, installEvt: null,
 };
 
@@ -227,6 +229,7 @@ async function refresh() {
   S.me = d.me; S.users = d.users; S.cats = d.categories; S.items = d.items;
   S.feedings = d.feedings; S.feedOldest = d.feed_oldest; S.rev = d.rev; S.tigraPhoto = d.tigra_photo;
   if (S.feedFrom) S.feedings = (await api('/api/feedings?since=' + S.feedFrom)).feedings;
+  if (d.chat_rev !== S.chatRev) await loadChat(d.chat_rev);
   if (S.tab === 'log') loadLog(true);
   render();
 }
@@ -264,20 +267,28 @@ function render(force) {
   if (!force && inputFocused()) { S.pendingRender = true; return; }
   S.pendingRender = false;
   const scroll = window.scrollY;
+  const chatWasOpen = !!$('#chatlist');
   const tab = TABS.find((t) => t.id === S.tab) || TABS[0];
-  const view = { buy: viewBuy, home: viewHome, tigra: viewTigra, log: viewLog, more: viewMore }[tab.id];
+  const view = { buy: viewBuy, home: viewHome, tigra: viewTigra, chat: viewChat, log: viewLog, more: viewMore }[tab.id];
   const need = needItems().length;
+  const unread = tab.id === 'chat' ? 0 : chatUnread();
   $('#app').innerHTML = `
     <header class="top"><h1>${esc(tab.name)}</h1>${headerRight(tab.id)}</header>
     <main>${view()}</main>
     ${tab.id === 'home' ? '<button class="fab" data-a="new-item" aria-label="Добавить">+</button>' : ''}
+    ${tab.id === 'chat' ? chatBar() : ''}
     <nav class="tabs">${TABS.map((t) => `
       <button class="${t.id === tab.id ? 'on' : ''}" data-a="tab" data-tab="${t.id}">
         <span class="ic">${t.ic}</span>${t.name}
         ${t.id === 'buy' && need ? `<span class="badge">${need}</span>` : ''}
+        ${t.id === 'chat' && unread ? `<span class="badge">${unread}</span>` : ''}
       </button>`).join('')}
     </nav>`;
   window.scrollTo(0, scroll);
+  if (tab.id === 'chat') {
+    if (!chatWasOpen) scrollBottom();
+    markChatRead();
+  }
 }
 
 function headerRight(tab) {
@@ -513,6 +524,128 @@ function feedRow(f) {
     <span class="txt"><b>${esc(u ? u.name : '—')}</b>${sub ? `<small>${sub}</small>` : ''}</span>
     ${mine ? `<button class="del" data-a="feed-del" data-id="${f.id}" aria-label="Удалить">✕</button>` : ''}
   </div>`;
+}
+
+/* ── вкладка «Чат» ── */
+
+async function loadChat(rev) {
+  try {
+    const d = await api('/api/chat');
+    const fresh = d.messages;
+    const oldMax = S.chat.length ? S.chat[S.chat.length - 1].id : null;
+    // свежая страница заменяет хвост; более ранние, подгруженные кнопкой, остаются
+    const min = fresh.length ? fresh[0].id : Infinity;
+    const older = fresh.length ? S.chat.filter((m) => m.id > 0 && m.id < min) : [];
+    if (!older.length) S.chatMore = d.more;
+    S.chat = older.concat(fresh);
+    S.chatRev = rev;
+    if (store.get('chatRead', null) === null) store.set('chatRead', fresh.length ? fresh[fresh.length - 1].id : 0);
+    if (oldMax !== null && S.tab !== 'chat') {
+      const news = fresh.filter((m) => m.id > oldMax && m.user_id !== S.me.id);
+      const m = news[news.length - 1];
+      if (m) toast(`💬 ${userName(m.user_id)}: ${m.text}`);
+    }
+    if (S.tab === 'chat') updateChatList();
+  } catch (e) { /* чат подгрузится при следующем обновлении */ }
+}
+
+const chatUnread = () => {
+  const read = store.get('chatRead', 0) || 0;
+  return S.chat.filter((m) => m.id > read && m.user_id !== S.me.id).length;
+};
+
+function markChatRead() {
+  if (document.visibilityState !== 'visible' || !S.chat.length) return;
+  const last = S.chat[S.chat.length - 1].id;
+  if (last > (store.get('chatRead', 0) || 0)) store.set('chatRead', last);
+}
+
+const nearBottom = () => window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 120;
+const scrollBottom = () => window.scrollTo(0, document.documentElement.scrollHeight);
+
+function viewChat() {
+  return `<div id="chatlist">${chatList()}</div>`;
+}
+
+function updateChatList(forceBottom) {
+  const box = $('#chatlist');
+  if (!box) return;
+  const stick = forceBottom || nearBottom();
+  box.innerHTML = chatList();
+  if (stick) scrollBottom();
+  markChatRead();
+}
+
+const linkify = (html) => html.replace(/https?:\/\/[^\s<]+/g, (u) => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
+
+function chatList() {
+  if (!S.chat.length) {
+    return '<div class="empty"><div class="big">💬</div>Здесь общий чат для всех домашних.<br>Напишите первое сообщение!</div>';
+  }
+  let html = S.chatMore
+    ? `<div style="margin:6px 0 4px"><button class="btn ghost small" style="margin:0 auto" data-a="chat-more">${S.chatLoading ? '<span class="spin"></span>' : 'Показать раньше'}</button></div>`
+    : '';
+  let prev = null;
+  for (const m of S.chat) {
+    const label = dayLabel(m.at);
+    if (!prev || dayLabel(prev.at) !== label) html += `<div class="chat-day"><span>${esc(label)}</span></div>`;
+    const cont = prev && prev.user_id === m.user_id && dayLabel(prev.at) === label && m.at - prev.at < 300;
+    const mine = m.user_id === S.me.id;
+    const u = userById(m.user_id);
+    html += `<div class="msg${mine ? ' mine' : ''}${cont ? ' cont' : ''}${m.id < 0 ? ' sending' : ''}"${mine && m.id > 0 ? ` data-a="chat-del" data-id="${m.id}"` : ''}>
+      ${mine ? '' : cont ? '<span class="avatar-gap"></span>' : avatarHtml(u)}
+      <div class="bubble">${!mine && !cont ? `<b style="color:${esc(u ? u.color : '#888')}">${esc(u ? u.name : '—')}</b>` : ''}<span class="mtext">${linkify(esc(m.text))}</span><span class="mtime">${hhmm(new Date(m.at * 1000))}</span></div>
+    </div>`;
+    prev = m;
+  }
+  return html;
+}
+
+function chatBar() {
+  return `<div class="chatbar">
+    <textarea id="chatmsg" rows="1" maxlength="2000" placeholder="Сообщение…">${esc(S.chatDraft)}</textarea>
+    <button class="send" data-a="chat-send" aria-label="Отправить">➤</button>
+  </div>`;
+}
+
+async function sendChat() {
+  const box = $('#chatmsg');
+  const text = (box ? box.value : S.chatDraft).trim();
+  if (!text) return;
+  S.chatDraft = '';
+  if (box) { box.value = ''; box.style.height = ''; }
+  const tmp = { id: -Date.now(), user_id: S.me.id, at: nowSec(), text };
+  S.chat.push(tmp);
+  updateChatList(true);
+  try {
+    await api('/api/chat', { text });
+    await refresh();
+  } catch (e) {
+    S.chat = S.chat.filter((m) => m !== tmp);
+    S.chatDraft = text;
+    if (box) box.value = text;
+    updateChatList();
+    toast(e.message, null, true);
+  }
+}
+
+async function loadOlderChat() {
+  if (S.chatLoading || !S.chat.length) return;
+  S.chatLoading = true;
+  updateChatList();
+  try {
+    const d = await api('/api/chat?before=' + S.chat.find((m) => m.id > 0).id);
+    const h = document.documentElement.scrollHeight, y = window.scrollY;
+    S.chat = d.messages.concat(S.chat);
+    S.chatMore = d.more;
+    S.chatLoading = false;
+    updateChatList();
+    window.scrollTo(0, y + document.documentElement.scrollHeight - h);
+  } catch (e) {
+    S.chatLoading = false;
+    updateChatList();
+    toast(e.message, null, true);
+  }
 }
 
 /* ── вкладка «История» ── */
@@ -1116,7 +1249,8 @@ const ACTIONS = {
   tab(el) {
     S.tab = el.dataset.tab; store.set('tab', S.tab);
     if (S.tab === 'log') loadLog(true);
-    render(true); window.scrollTo(0, 0);
+    render(true);
+    if (S.tab !== 'chat') window.scrollTo(0, 0);
   },
   'hide-install'(el, e) { e.stopPropagation(); store.set('hideInstall', true); render(true); },
   install() {
@@ -1156,6 +1290,13 @@ const ACTIONS = {
     refresh().catch((e) => toast(e.message, null, true));
   },
   'tigra-photo'() { tigraPhoto(); },
+  'chat-send'() { sendChat(); },
+  'chat-more'() { loadOlderChat(); },
+  'chat-del'(el, e) {
+    if (e.target.closest('a')) return;
+    if (!confirm('Удалить это сообщение?')) return;
+    run(() => api(`/api/chat/${el.dataset.id}/delete`, {})).catch(() => {});
+  },
   'log-user'(el) { S.logUser = el.dataset.u; S.log = []; loadLog(true); render(true); },
   'log-more'() { loadLog(false); render(true); },
   'me-edit'() { meSheet(); },
@@ -1184,10 +1325,25 @@ document.addEventListener('input', (e) => {
   } else if (e.target.id === 'q') {
     S.q = e.target.value;
     $('#homelist').innerHTML = homeList();
+  } else if (e.target.id === 'chatmsg') {
+    S.chatDraft = e.target.value;
+    e.target.style.height = '';
+    e.target.style.height = Math.min(e.target.scrollHeight, 140) + 'px';
   }
 });
 
+// кнопка «отправить» не должна забирать фокус у поля — иначе на телефоне закрывается клавиатура
+document.addEventListener('mousedown', (e) => { if (e.target.closest('.chatbar .send')) e.preventDefault(); });
+document.addEventListener('focusin', (e) => { if (e.target.id === 'chatmsg') document.body.classList.add('typing'); });
+document.addEventListener('focusout', (e) => { if (e.target.id === 'chatmsg') document.body.classList.remove('typing'); });
+
 document.addEventListener('keydown', (e) => {
+  // в чате: на компьютере Enter отправляет (Shift+Enter — новая строка), на телефоне Enter — новая строка
+  if (e.target.id === 'chatmsg' && e.key === 'Enter' && !e.shiftKey && !e.isComposing && !matchMedia('(pointer: coarse)').matches) {
+    e.preventDefault();
+    sendChat();
+    return;
+  }
   if (e.target.id === 'addq' && e.key === 'Enter') {
     e.preventDefault();
     const q = S.addQ.trim().toLowerCase();
@@ -1241,6 +1397,7 @@ window.addEventListener('beforeinstallprompt', (e) => {
 
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') poll(); });
 setInterval(poll, 15000);
+setInterval(() => { if (S.tab === 'chat') poll(); }, 4000); // в открытом чате новые сообщения приходят быстрее
 setInterval(() => { if (S.me && !S.sheetOpen && ['tigra', 'buy', 'home'].includes(S.tab)) render(); }, 60000);
 
 if ('serviceWorker' in navigator) {

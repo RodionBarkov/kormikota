@@ -81,6 +81,9 @@ CREATE TABLE IF NOT EXISTS items(
 CREATE TABLE IF NOT EXISTS feedings(
   id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, at INTEGER NOT NULL,
   what TEXT NOT NULL DEFAULT '', deleted INTEGER NOT NULL DEFAULT 0, added_at INTEGER);
+CREATE TABLE IF NOT EXISTS messages(
+  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, at INTEGER NOT NULL,
+  text TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS log(
   id INTEGER PRIMARY KEY, user_id INTEGER, at INTEGER NOT NULL, icon TEXT NOT NULL DEFAULT '',
   text TEXT NOT NULL, item_id INTEGER);
@@ -342,6 +345,7 @@ def api_state(req, db, user):
             (now() - FEED_DAYS * 86400,))),
         "feed_oldest": db.execute("SELECT MIN(at) FROM feedings WHERE deleted=0").fetchone()[0],
         "tigra_photo": get_meta(db, "tigra_photo"),
+        "chat_rev": int(get_meta(db, "chat_rev", "0")),
     })
 
 
@@ -605,6 +609,46 @@ def api_feed_delete(req, db, user, feed_id):
     return ok()
 
 
+# ───────────────────────────── чат ─────────────────────────────
+
+CHAT_PAGE = 50
+
+
+def chat_bump(db):
+    # отдельная ревизия чата: клиент перезагружает сообщения, только когда в чате что-то изменилось
+    set_meta(db, "chat_rev", str(int(get_meta(db, "chat_rev", "0")) + 1))
+    bump(db)
+
+
+def api_chat(req, db, user):
+    sql, args = "SELECT id,user_id,at,text FROM messages WHERE deleted=0", []
+    if req.query.get("before", "").isdigit():
+        sql += " AND id<?"
+        args.append(int(req.query["before"]))
+    msgs = rows(db.execute(sql + " ORDER BY id DESC LIMIT %d" % CHAT_PAGE, args))
+    return ok({"messages": msgs[::-1], "more": len(msgs) == CHAT_PAGE})
+
+
+def api_chat_send(req, db, user):
+    text = s(req.json(), "text", 2000, True)
+    cur = db.execute("INSERT INTO messages(user_id,at,text) VALUES(?,?,?)", (user["id"], now(), text))
+    chat_bump(db)
+    db.commit()
+    return ok({"id": cur.lastrowid})
+
+
+def api_chat_delete(req, db, user, msg_id):
+    m = db.execute("SELECT * FROM messages WHERE id=? AND deleted=0", (msg_id,)).fetchone()
+    if not m:
+        raise HttpError(404, "Сообщение не найдено")
+    if m["user_id"] != user["id"] and user["role"] != "admin":
+        raise HttpError(403, "Удалить можно только своё сообщение")
+    db.execute("UPDATE messages SET deleted=1 WHERE id=?", (msg_id,))
+    chat_bump(db)
+    db.commit()
+    return ok()
+
+
 # ───────────────────────────── категории ─────────────────────────────
 
 def api_cat_create(req, db, user):
@@ -799,6 +843,9 @@ ROUTES = [
     ("POST", r"/api/feed/(\d+)", api_feed_update, USER),
     ("POST", r"/api/feed/(\d+)/delete", api_feed_delete, USER),
     ("POST", r"/api/tigra/photo", api_tigra_photo, USER),
+    ("GET", r"/api/chat", api_chat, USER),
+    ("POST", r"/api/chat", api_chat_send, USER),
+    ("POST", r"/api/chat/(\d+)/delete", api_chat_delete, USER),
     ("POST", r"/api/categories", api_cat_create, USER),
     ("POST", r"/api/categories/(\d+)", api_cat_update, USER),
     ("POST", r"/api/categories/(\d+)/delete", api_cat_delete, USER),

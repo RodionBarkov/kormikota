@@ -323,3 +323,33 @@ main { padding: 0 16px calc(var(--tabs-h) + env(safe-area-inset-bottom) + 90px);
 .feed-row[role="button"] { cursor: pointer; }
 .feed-row .txt small { white-space: normal; }
 input[type="date"], input[type="time"] { min-width: 0; min-height: 50px; -webkit-appearance: none; appearance: none; }
+
+/* ── чат ── */
+.chat-day { text-align: center; margin: 16px 0 8px; }
+.chat-day span { display: inline-block; font-size: 12px; font-weight: 600; color: var(--muted); background: var(--soft); padding: 3px 10px; border-radius: 10px; }
+.msg { display: flex; align-items: flex-end; gap: 8px; margin-top: 8px; }
+.msg.cont { margin-top: 3px; }
+.msg.mine { justify-content: flex-end; }
+.msg.sending { opacity: .6; }
+.msg .avatar, .avatar-gap { width: 30px; height: 30px; font-size: 13px; flex: none; }
+.bubble {
+  max-width: 78%; display: flex; flex-direction: column; padding: 7px 12px 5px;
+  background: var(--card); box-shadow: var(--shadow); border-radius: 18px 18px 18px 6px;
+}
+.msg.mine .bubble { background: var(--accent); color: #fff; border-radius: 18px 18px 6px 18px; }
+.bubble b { font-size: 13px; margin-bottom: 1px; }
+.mtext { white-space: pre-wrap; overflow-wrap: anywhere; }
+.mtext a { color: inherit; text-decoration: underline; }
+.mtime { align-self: flex-end; font-size: 11px; opacity: .6; margin-top: 1px; font-variant-numeric: tabular-nums; }
+.chatbar {
+  position: fixed; left: 0; right: 0; bottom: calc(var(--tabs-h) + env(safe-area-inset-bottom)); z-index: 15;
+  display: flex; align-items: flex-end; gap: 8px;
+  padding: 8px max(12px, calc((100% - 680px) / 2 + 16px));
+  background: var(--bg); background: color-mix(in srgb, var(--bg) 92%, transparent);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); border-top: 1px solid var(--line);
+}
+.chatbar textarea { min-height: 44px; max-height: 140px; resize: none; border-radius: 22px; padding: 10px 16px; line-height: 1.35; }
+.chatbar .send { width: 44px; height: 44px; flex: none; border-radius: 50%; background: var(--accent); color: #fff; font-size: 18px; }
+.chatbar .send:active { transform: scale(.92); }
+body.typing .tabs { display: none; }
+body.typing .chatbar { bottom: 0; padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
