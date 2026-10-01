@@ -353,3 +353,7 @@ input[type="date"], input[type="time"] { min-width: 0; min-height: 50px; -webkit
 .chatbar .send:active { transform: scale(.92); }
 body.typing .tabs { display: none; }
 body.typing .chatbar { bottom: 0; padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
+
+/* ── вложенные экраны (История внутри «Ещё») ── */
+.top .back { width: 36px; height: 36px; margin: 0 -6px 0 -8px; border-radius: 50%; font-size: 32px; line-height: 1; color: var(--accent); display: flex; align-items: center; justify-content: center; padding-bottom: 4px; }
+.top .back:active { background: var(--soft); }

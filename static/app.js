@@ -22,9 +22,10 @@ const TABS = [
   { id: 'home', ic: '🏠', name: 'Дома' },
   { id: 'tigra', ic: '🐯', name: 'Тигра' },
   { id: 'chat', ic: '💬', name: 'Чат' },
-  { id: 'log', ic: '🕓', name: 'История' },
   { id: 'more', ic: '⚙️', name: 'Ещё' },
 ];
+// экраны, которые открываются изнутри вкладки (в нижней панели их нет)
+const PAGES = { log: { name: 'История', parent: 'more' } };
 
 const S = {
   me: null, users: [], cats: [], items: [], feedings: [], feedOldest: null, feedFrom: null, rev: 0, tigraPhoto: null,
@@ -268,17 +269,19 @@ function render(force) {
   S.pendingRender = false;
   const scroll = window.scrollY;
   const chatWasOpen = !!$('#chatlist');
-  const tab = TABS.find((t) => t.id === S.tab) || TABS[0];
+  const page = PAGES[S.tab];
+  const tab = page ? { id: S.tab, name: page.name } : TABS.find((t) => t.id === S.tab) || TABS[0];
+  const navOn = page ? page.parent : tab.id;
   const view = { buy: viewBuy, home: viewHome, tigra: viewTigra, chat: viewChat, log: viewLog, more: viewMore }[tab.id];
   const need = needItems().length;
   const unread = tab.id === 'chat' ? 0 : chatUnread();
   $('#app').innerHTML = `
-    <header class="top"><h1>${esc(tab.name)}</h1>${headerRight(tab.id)}</header>
+    <header class="top">${page ? '<button class="back" data-a="page-back" aria-label="Назад">‹</button>' : ''}<h1>${esc(tab.name)}</h1>${headerRight(tab.id)}</header>
     <main>${view()}</main>
     ${tab.id === 'home' ? '<button class="fab" data-a="new-item" aria-label="Добавить">+</button>' : ''}
     ${tab.id === 'chat' ? chatBar() : ''}
     <nav class="tabs">${TABS.map((t) => `
-      <button class="${t.id === tab.id ? 'on' : ''}" data-a="tab" data-tab="${t.id}">
+      <button class="${t.id === navOn ? 'on' : ''}" data-a="tab" data-tab="${t.id}">
         <span class="ic">${t.ic}</span>${t.name}
         ${t.id === 'buy' && need ? `<span class="badge">${need}</span>` : ''}
         ${t.id === 'chat' && unread ? `<span class="badge">${unread}</span>` : ''}
@@ -732,6 +735,14 @@ function viewMore() {
       </div>
     </div>
 
+    <div class="list" style="margin-top:10px">
+      <button class="row" data-a="open-page" data-page="log">
+        <span class="thumb" style="width:40px;height:40px;font-size:22px">🕓</span>
+        <span class="txt"><b>История действий</b><small>кто что отмечал, покупал и менял</small></span>
+        <span class="muted">›</span>
+      </button>
+    </div>
+
     <div class="group-title">📲 На экран телефона</div>
     <div class="card section">${installHtml()}</div>
 
@@ -796,8 +807,21 @@ function hideSheetNow() {
 
 window.addEventListener('popstate', () => {
   if ($('#viewer').classList.contains('show')) { $('#viewer').classList.remove('show'); return; }
-  if (S.sheetOpen) hideSheetNow();
+  if (S.sheetOpen) { hideSheetNow(); return; }
+  if (PAGES[S.tab]) leavePage();
 });
+
+function openPage(id) {
+  S.tab = id; store.set('tab', id);
+  history.pushState({ page: id }, '');
+  if (id === 'log') loadLog(true);
+  render(true); window.scrollTo(0, 0);
+}
+
+function leavePage() {
+  S.tab = PAGES[S.tab].parent; store.set('tab', S.tab);
+  render(true); window.scrollTo(0, 0);
+}
 
 const sheetHead = (title) => `<h2>${title}<button class="close" data-a="close-sheet" aria-label="Закрыть">✕</button></h2>`;
 
@@ -1307,6 +1331,8 @@ const ACTIONS = {
   'user-edit'(el) { userSheet(+el.dataset.id); },
   'user-new'() { userSheet(null); },
   'close-sheet'() { closeSheet(); },
+  'open-page'(el) { openPage(el.dataset.page); },
+  'page-back'() { if (history.state && history.state.page) history.back(); else leavePage(); },
   logout() { logout(); },
 };
 
